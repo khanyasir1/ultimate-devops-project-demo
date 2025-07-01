@@ -128,14 +128,13 @@ func main() {
 		}
 		log.Println("Shutdown meter provider")
 	}()
+
 	openfeature.AddHooks(otelhooks.NewTracesHook())
-	err := openfeature.SetProvider(flagd.NewProvider())
-	if err != nil {
+	if err := openfeature.SetProvider(flagd.NewProvider()); err != nil {
 		log.Fatal(err)
 	}
 
-	err = runtime.Start(runtime.WithMinimumReadMemStatsInterval(time.Second))
-	if err != nil {
+	if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(time.Second)); err != nil {
 		log.Fatal(err)
 	}
 
@@ -145,7 +144,7 @@ func main() {
 
 	log.Infof("Product Catalog gRPC server started on port: %s", port)
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
+	ln, err := net.Listen("tcp", ":"+port) // ✅ removed fmt.Sprintf
 	if err != nil {
 		log.Fatalf("TCP Listen: %v", err)
 	}
@@ -179,8 +178,6 @@ type productCatalog struct {
 }
 
 func readProductFiles() ([]*pb.Product, error) {
-
-	// find all .json files in the products directory
 	entries, err := os.ReadDir("./products")
 	if err != nil {
 		return nil, err
@@ -197,8 +194,6 @@ func readProductFiles() ([]*pb.Product, error) {
 		}
 	}
 
-	// read the contents of each .json file and unmarshal into a ListProductsResponse
-	// then append the products to the catalog
 	var products []*pb.Product
 	for _, f := range jsonFiles {
 		jsonData, err := os.ReadFile("./products/" + f.Name())
@@ -215,7 +210,6 @@ func readProductFiles() ([]*pb.Product, error) {
 	}
 
 	log.Infof("Loaded %d products", len(products))
-
 	return products, nil
 }
 
@@ -237,48 +231,33 @@ func (p *productCatalog) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Hea
 
 func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.ListProductsResponse, error) {
 	span := trace.SpanFromContext(ctx)
-
-	span.SetAttributes(
-		attribute.Int("app.products.count", len(catalog)),
-	)
+	span.SetAttributes(attribute.Int("app.products.count", len(catalog)))
 	return &pb.ListProductsResponse{Products: catalog}, nil
 }
 
 func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(
-		attribute.String("app.product.id", req.Id),
-	)
+	span.SetAttributes(attribute.String("app.product.id", req.Id))
 
-	// GetProduct will fail on a specific product when feature flag is enabled
 	if p.checkProductFailure(ctx, req.Id) {
-		msg := fmt.Sprintf("Error: Product Catalog Fail Feature Flag Enabled")
+		msg := "Error: Product Catalog Fail Feature Flag Enabled"
 		span.SetStatus(otelcodes.Error, msg)
 		span.AddEvent(msg)
 		return nil, status.Errorf(codes.Internal, msg)
 	}
 
-	var found *pb.Product
 	for _, product := range catalog {
 		if req.Id == product.Id {
-			found = product
-			break
+			span.AddEvent("Product Found - ID: " + req.Id + ", Name: " + product.Name)
+			span.SetAttributes(attribute.String("app.product.name", product.Name))
+			return product, nil
 		}
 	}
 
-	if found == nil {
-		msg := fmt.Sprintf("Product Not Found: %s", req.Id)
-		span.SetStatus(otelcodes.Error, msg)
-		span.AddEvent(msg)
-		return nil, status.Errorf(codes.NotFound, msg)
-	}
-
-	msg := fmt.Sprintf("Product Found - ID: %s, Name: %s", req.Id, found.Name)
+	msg := "Product Not Found: " + req.Id
+	span.SetStatus(otelcodes.Error, msg)
 	span.AddEvent(msg)
-	span.SetAttributes(
-		attribute.String("app.product.name", found.Name),
-	)
-	return found, nil
+	return nil, status.Errorf(codes.NotFound, msg)
 }
 
 func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
@@ -291,9 +270,7 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 			result = append(result, product)
 		}
 	}
-	span.SetAttributes(
-		attribute.Int("app.products_search.count", len(result)),
-	)
+	span.SetAttributes(attribute.Int("app.products_search.count", len(result)))
 	return &pb.SearchProductsResponse{Results: result}, nil
 }
 
@@ -303,20 +280,6 @@ func (p *productCatalog) checkProductFailure(ctx context.Context, id string) boo
 	}
 
 	client := openfeature.NewClient("productCatalog")
-	failureEnabled, _ := client.BooleanValue(
-		ctx, "productCatalogFailure", false, openfeature.EvaluationContext{},
-	)
+	failureEnabled, _ := client.BooleanValue(ctx, "productCatalogFailure", false, openfeature.EvaluationContext{})
 	return failureEnabled
 }
-
-func createClient(ctx context.Context, svcAddr string) (*grpc.ClientConn, error) {
-	return grpc.DialContext(ctx, svcAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-	)
-}
-
-
-
-
-
